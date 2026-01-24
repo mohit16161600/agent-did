@@ -8,12 +8,13 @@
     body {
         font-family: "Segoe UI", Arial, sans-serif;
         background: #f1f3f6;
-        padding: 20px;
+        padding: 5px 20px; /* Reduced top padding */
     }
 
     h2 {
-        margin-bottom: 15px;
+        margin-bottom: 10px;
         color: #222;
+        font-size: 1.2rem; /* Compact header */
     }
 
     .table-wrapper {
@@ -80,6 +81,12 @@
         animation: pulse 1.2s infinite;
     }
 
+    .offline {
+        background: #e03d2431;
+        color: #9f1b14ff;
+        border: 1px solid #9f1b14ff;
+    }
+
     @keyframes pulse {
         0% { box-shadow: 0 0 0 0 rgba(251,191,36,0.6); }
         70% { box-shadow: 0 0 0 8px rgba(251,191,36,0); }
@@ -101,16 +108,72 @@
         font-weight: bold;
         color: #1f2937;
     }
+
+    .filter-wrapper {
+        margin-bottom: 20px;
+        display: flex;
+        gap: 10px;
+        justify-content: flex-end;
+    }
+
+    .filter-btn {
+        padding: 8px 16px;
+        border: 1px solid #e5e7eb;
+        background: #fff;
+        border-radius: 20px;
+        font-size: 13px;
+        font-weight: 500;
+        color: #4b5563;
+        cursor: pointer;
+        transition: all 0.2s;
+    }
+
+    .filter-btn:hover {
+        background: #f9fafb;
+        border-color: #d1d5db;
+    }
+
+    .filter-btn.active {
+        background: #111827;
+        color: #fff;
+        border-color: #111827;
+    }
+
+    .count-badge {
+        background: #e5e7eb;
+        color: #1f2937;
+        padding: 2px 6px;
+        border-radius: 10px;
+        font-size: 11px;
+        font-weight: 700;
+        margin-left: 5px;
+        vertical-align: middle;
+    }
+    
+    .filter-btn.active .count-badge {
+        background: #374151;
+        color: #fff;
+    }
 </style>
 
-<h2>📞 Live Calls CRM</h2>
+<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+    <h2 style="margin: 0;">📞 Live Calls CRM</h2>
+    <!-- Filter Tabs -->
+    <div class="filter-wrapper" style="margin: 0;">
+        <button id="btn-all" class="filter-btn active" onclick="setFilter('All', this)">All</button>
+        <button id="btn-answered" class="filter-btn" onclick="setFilter('Answered', this)">Answered</button>
+        <button id="btn-ringing" class="filter-btn" onclick="setFilter('Ringing', this)">Ringing</button>
+        <button id="btn-not-on-call" class="filter-btn" onclick="setFilter('Not on call', this)">Not on call</button>
+    </div>
+</div>
 
 <div class="table-wrapper">
     <table id="callTable">
         <thead>
             <tr>
+                <th>S.No</th>
                 <th>Agent</th>
-                <th>Customer</th>
+                <!-- <th>Customer</th> removed -->
                 <th>Status</th>
                 <th>Call Time</th>
             </tr>
@@ -121,6 +184,19 @@
 
 
 <script>
+let currentFilter = 'All';
+
+function setFilter(status, btn) {
+    currentFilter = status;
+    
+    // Update UI active state
+    document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+
+    // Reload immediately
+    loadCalls();
+}
+
 function loadCalls() {
     fetch('calls.php')
         .then(res => res.json())
@@ -129,13 +205,42 @@ function loadCalls() {
 
             if (!Array.isArray(data)) return;
 
+            // Calculate counts
+            let counts = { 'All': data.length, 'Answered': 0, 'Ringing': 0, 'Not on call': 0 };
+            data.forEach(c => {
+                if (c.state === 'Answered') counts['Answered']++;
+                else if (c.state === 'Ringing') counts['Ringing']++;
+                else counts['Not on call']++;
+            });
+
+            // Update filter buttons
+            document.getElementById('btn-all').innerHTML = `All <span class="count-badge">${counts['All']}</span>`;
+            document.getElementById('btn-answered').innerHTML = `Answered <span class="count-badge">${counts['Answered']}</span>`;
+            document.getElementById('btn-ringing').innerHTML = `Ringing <span class="count-badge">${counts['Ringing']}</span>`;
+            document.getElementById('btn-not-on-call').innerHTML = `Not on call <span class="count-badge">${counts['Not on call']}</span>`;
+
+            let index = 0; // for serial number
             data.forEach(call => {
-                let statusClass = call.state === 'Answered' ? 'answered' : 'ringing';
+                // FILTER LOGIC
+                if (currentFilter !== 'All' && call.state !== currentFilter) return;
+
+                index++; // Increment serial number only for visible rows
+
+                let statusClass = '';
+                if (call.state === 'Answered') statusClass = 'answered';
+                else if (call.state === 'Ringing') statusClass = 'ringing';
+                else statusClass = 'offline'; // For "Not on call"
 
                 html += `
                     <tr>
-                        <td class="agent">${call.agent_name ?? '-'}</td>
-                        <td class="number">${call.customer_number ?? '-'}</td>
+                        <td>${index}</td>
+                        <td class="agent">
+                            <div>${call.agent_name ?? '-'}</div>
+                            <div class="number" style="font-size: 11px; color: #6b7280; margin-top: 2px;">
+                                ${String(call.customer_number ?? '-').replace(/.(?=.{2})/g, '*')}
+                            </div>
+                        </td>
+                        <!-- <td class="number">...</td> removed -->
                         <td>
                             <span class="status ${statusClass}">
                                 ${call.state ?? '-'}
@@ -151,7 +256,7 @@ function loadCalls() {
 }
 
 loadCalls();
-setInterval(loadCalls, 1000); // safer than 1 sec
+setInterval(loadCalls, 500); // safer than 1 sec
 </script>
 
 
