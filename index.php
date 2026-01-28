@@ -176,6 +176,9 @@
                 <!-- <th>Customer</th> removed -->
                 <th>Status</th>
                 <th>Call Time</th>
+                <th>Today Total</th>
+                <th>Idle Total</th>
+                <!-- <th>Yesterday Total</th> -->
             </tr>
         </thead>
         <tbody></tbody>
@@ -203,7 +206,10 @@ function loadCalls() {
         .then(data => {
             let html = '';
 
-            if (!Array.isArray(data)) return;
+            if (!Array.isArray(data) || data.length === 0) return;
+
+            // Filter out empty names
+            data = data.filter(c => c.agent_name && c.agent_name.trim() !== '');
 
             // Calculate counts
             let counts = { 'All': data.length, 'Answered': 0, 'Ringing': 0, 'Not on call': 0 };
@@ -214,7 +220,7 @@ function loadCalls() {
             });
 
             // Update filter buttons
-            document.getElementById('btn-all').innerHTML = `All <span class="count-badge">${counts['All']}</span>`;
+            // document.getElementById('btn-all').innerHTML = `All <span class="count-badge">${counts['All']}</span>`;
             document.getElementById('btn-answered').innerHTML = `Answered <span class="count-badge">${counts['Answered']}</span>`;
             document.getElementById('btn-ringing').innerHTML = `Ringing <span class="count-badge">${counts['Ringing']}</span>`;
             document.getElementById('btn-not-on-call').innerHTML = `Not on call <span class="count-badge">${counts['Not on call']}</span>`;
@@ -231,14 +237,18 @@ function loadCalls() {
                 else if (call.state === 'Ringing') statusClass = 'ringing';
                 else statusClass = 'offline'; // For "Not on call"
 
+                let sourceLabel = '';
+                if(String(call.user_id) === '206316') sourceLabel = '<span style="font-size:10px; background:#e0f2fe; color:#0369a1; padding:2px 6px; border-radius:4px; margin-left:8px;">Tata Tele </span>';
+                else if(String(call.user_id) === '533950') sourceLabel = '<span style="font-size:10px; background:#f0fdf4; color:#15803d; padding:2px 6px; border-radius:4px; margin-left:8px;">Tata Tele 2</span>';
+
                 html += `
                     <tr>
                         <td>${index}</td>
                         <td class="agent">
-                            <div>${call.agent_name ?? '-'}</div>
-                            <div class="number" style="font-size: 11px; color: #6b7280; margin-top: 2px;">
-                                ${String(call.customer_number ?? '-').replace(/.(?=.{2})/g, '*')}
-                            </div>
+                            <div>${call.agent_name ?? '-'}${sourceLabel}</div>
+                            <!-- <div class="number" style="font-size: 11px; color: #6b7280; margin-top: 2px;">
+                                 ${String(call.customer_number ?? '-').replace(/.(?=.{2})/g, '*')}
+                            </div> -->
                         </td>
                         <!-- <td class="number">...</td> removed -->
                         <td>
@@ -247,6 +257,8 @@ function loadCalls() {
                             </span>
                         </td>
                         <td class="time">${call.call_time ?? '00:00:00'}</td>
+                        <td class="time" style="color: #059669;">${call.today_total ?? '00:00:00'}</td>
+                        <td class="time" style="color: #d97706;">${call.today_idle_total ?? '00:00:00'}</td>
                     </tr>
                 `;
             });
@@ -256,8 +268,9 @@ function loadCalls() {
 }
 
 loadCalls();
-setInterval(loadCalls, 500); // safer than 1 sec
+setInterval(loadCalls, 2000); // safer than 1 sec
 </script>
+                        <!-- <td class="time" style="color: #6b7280;">${call.yesterday_total ?? '00:00:00'}</td> -->
 
 
 </body>

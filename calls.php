@@ -33,6 +33,12 @@ foreach ($tokens as $token) {
     }
 }
 
+// Sort combined data by call_time DESC to interleave results from both tokens
+usort($data, function($a, $b) {
+    // Assuming call_time is in HH:MM:SS format
+    return strtotime($b['call_time']) - strtotime($a['call_time']);
+});
+
 // Database insertion logic
 $conn = new mysqli('localhost', 'root', '', 'agent_did');
 if (!$conn->connect_error) {
@@ -49,54 +55,111 @@ if (!$conn->connect_error) {
         $checkStmt = $conn->prepare($checkSql);
         $insertStmt = $conn->prepare($insertSql);
 
+
+
+
+        // --- DAY RESET LOGIC ---
+        $conn->query("UPDATE `agent data` SET 
+                      yesterday_total = today_total, 
+                      today_total = 0, 
+                      yesterday_idle_total = today_idle_total,
+                      today_idle_total = 0,
+                      last_log_date = CURDATE() 
+                      WHERE last_log_date < CURDATE() OR last_log_date IS NULL");
+
+        // --- TRACK ACTIVE AGENTS ---
+        $activeAgentNames = [];
+
+        // --- UPDATE & INSERT LOGIC (Active Calls) ---
         if ($checkStmt && $insertStmt) {
             foreach ($data as $call) {
                 $name = $call['agent_name'] ?? null;
                 $id = $call['user_id'] ?? null;
+                $state = $call['state'] ?? '';
 
                 if ($name && $id) {
+                    $activeAgentNames[$name] = true;
+
                     $checkStmt->bind_param("s", $name);
-                    if (!$checkStmt->execute()) {
-                         file_put_contents('db_error.log', date('Y-m-d H:i:s') . " Check Execute failed: " . $checkStmt->error . "\n", FILE_APPEND);
-                    }
+                    $checkStmt->execute();
                     $result = $checkStmt->get_result();
 
                     if ($result->num_rows === 0) {
+                        // Insert new agent
                         $insertStmt->bind_param("si", $name, $id);
-                        if (!$insertStmt->execute()) {
-                            file_put_contents('db_error.log', date('Y-m-d H:i:s') . " Insert Execute failed for $name: " . $insertStmt->error . "\n", FILE_APPEND);
-                        }
+                        $insertStmt->execute();
+                        
+                        // Initialize timestamps
+                        $conn->query("UPDATE `agent data` SET 
+                            last_log_date = CURDATE(), 
+                            last_activity_timestamp = UNIX_TIMESTAMP(),
+                            last_idle_timestamp = UNIX_TIMESTAMP() 
+                            WHERE BINARY `name` = '" . $conn->real_escape_string($name) . "'");
                     } else {
-                        // Agent exists and is active, update logg-off to NOW()
-                        // This effectively keeps "active" status fresh
-                        // Note: prepared statement for UPDATE is also better, but raw query with escape is acceptable for now given the context
-                        if (!$conn->query("UPDATE `agent data` SET `logg-off` = NOW() WHERE BINARY `name` = '" . $conn->real_escape_string($name) . "'")) {
-                             file_put_contents('db_error.log', date('Y-m-d H:i:s') . " Update failed for $name: " . $conn->error . "\n", FILE_APPEND);
+                        // Update Active Agent
+                        // Calculate Talk Time Increment
+                        $timeIncSql = "0";
+                        if ($state === 'Answered' || $state === 'Ringing') {
+                            $timeIncSql = "IF(UNIX_TIMESTAMP() - last_activity_timestamp < 15, UNIX_TIMESTAMP() - last_activity_timestamp, 0)";
                         }
+
+                        // Reset idle timestamp so it doesn't jump when they go idle
+                        $updateSql = "UPDATE `agent data` SET 
+                                      `logg-off` = NOW(),
+                                      `last_log_date` = CURDATE(),
+                                      `today_total` = `today_total` + $timeIncSql,
+                                      `last_activity_timestamp` = UNIX_TIMESTAMP(),
+                                      `last_idle_timestamp` = UNIX_TIMESTAMP()
+                                      WHERE BINARY `name` = '" . $conn->real_escape_string($name) . "'";
+                        
+                        $conn->query($updateSql);
                     }
-                } else {
-                    // Log missing data
-                     // file_put_contents('db_error.log', date('Y-m-d H:i:s') . " Missing name or id for call: " . json_encode($call) . "\n", FILE_APPEND);
                 }
             }
             $checkStmt->close();
             $insertStmt->close();
+        }
+
+        // --- UPDATE IDLE LOGIC (Inactive Agents) ---
+        // We must update agents who are NOT in $activeAgentNames
+        // We iterate all agents to do this efficiently or use a WHERE NOT IN query?
+        // Using a single query is efficient:
+        if (!empty($activeAgentNames)) {
+            // Escape names for safety
+            $escapedNames = array_map(function($n) use ($conn) { return "'" . $conn->real_escape_string($n) . "'"; }, array_keys($activeAgentNames));
+            $nameList = implode(',', $escapedNames);
+            
+            // Increment idle time for everyone NOT in the active list
+            // Only if request time - last_idle_timestamp is small (captured consistently)
+            // We use last_idle_timestamp to track 'idle' segments. 
+            $idleUpdateSql = "UPDATE `agent data` SET 
+                              `today_idle_total` = `today_idle_total` + IF(UNIX_TIMESTAMP() - last_idle_timestamp < 15, UNIX_TIMESTAMP() - last_idle_timestamp, 0),
+                              `last_activity_timestamp` = UNIX_TIMESTAMP(), 
+                              `last_idle_timestamp` = UNIX_TIMESTAMP()
+                              WHERE `name` NOT IN ($nameList) AND last_log_date = CURDATE()"; 
+                              // Only update agents we've seen today (log date reset handles this)
+            
+            $conn->query($idleUpdateSql);
         } else {
-            file_put_contents('db_error.log', date('Y-m-d H:i:s') . " Prepare failed: " . $conn->error . "\n", FILE_APPEND);
+             // If NO active calls, EVERYONE is idle (who has logged in today)
+             $idleUpdateSql = "UPDATE `agent data` SET 
+                              `today_idle_total` = `today_idle_total` + IF(UNIX_TIMESTAMP() - last_idle_timestamp < 15, UNIX_TIMESTAMP() - last_idle_timestamp, 0),
+                              `last_activity_timestamp` = UNIX_TIMESTAMP(),
+                              `last_idle_timestamp` = UNIX_TIMESTAMP()
+                              WHERE last_log_date = CURDATE()";
+             $conn->query($idleUpdateSql);
         }
 
         // --- MERGE LOGIC ---
-        // 1. Get all known agents from DB AND current DB time
-        // We fetch NOW() to ensure we calculate diff based on DB timezone
-        // ORDER BY logg-off DESC ensures latest offline agents appear first
+        // 1. Get all known agents with TOTALS
             $allAgents = [];
-            $dbResult = $conn->query("SELECT `name`, `logg-off`, NOW() as db_now FROM `agent data` ORDER BY `logg-off` ASC");
+            $dbResult = $conn->query("SELECT `name`, `agent_id`, `logg-off`, `today_total`, `yesterday_total`, `today_idle_total`, NOW() as db_now FROM `agent data` ORDER BY `logg-off` ASC");
             while ($row = $dbResult->fetch_assoc()) {
                 $allAgents[$row['name']] = $row;
-                $currentDbTime = strtotime($row['db_now']); // Capture DB time once (or per row, same thing)
+                $currentDbTime = strtotime($row['db_now']); // Capture DB time
             }
 
-            // 2. Map Active Calls by agent name
+            // 2. Map Active Calls 
             $activeCallsMap = [];
             foreach ($data as $call) {
                 if (isset($call['agent_name'])) {
@@ -107,33 +170,47 @@ if (!$conn->connect_error) {
         // 3. Build Final Response
         $finalResponse = [];
 
-        // First, add all ACTIVE calls (ensure they are in the list)
-        foreach ($data as $call) {
-             $finalResponse[] = $call;
-             // Remove from map to track who is processed
-             unset($allAgents[$call['agent_name']]);
+        // Helper to formatting seconds
+        function formatSeconds($sec) {
+            $hours = floor($sec / 3600);
+            $minutes = floor(($sec % 3600) / 60);
+            $seconds = $sec % 60;
+            return sprintf("%02d:%02d:%02d", $hours, $minutes, $seconds);
         }
 
-        // Next, add INACTIVE agents from DB
+        // First, add all ACTIVE calls
+        foreach ($data as $call) {
+             $name = $call['agent_name'];
+             // Attach totals from DB if available
+             $todayTotal = 0;
+             $yesterdayTotal = 0;
+             $todayIdle = 0;
+             if (isset($allAgents[$name])) {
+                 $todayTotal = (int)$allAgents[$name]['today_total'];
+                 $yesterdayTotal = (int)$allAgents[$name]['yesterday_total'];
+                 $todayIdle = (int)$allAgents[$name]['today_idle_total'];
+             }
+             
+             $call['today_total'] = formatSeconds($todayTotal);
+             $call['yesterday_total'] = formatSeconds($yesterdayTotal);
+             $call['today_idle_total'] = formatSeconds($todayIdle);
+             
+             $finalResponse[] = $call;
+             unset($allAgents[$name]);
+        }
+
+        // Next, add INACTIVE agents
         foreach ($allAgents as $name => $agentInfo) {
-            // Skip if somehow already added (though strict loop key check handles this)
             if (isset($activeCallsMap[$name])) continue;
 
             $logOffTime = $agentInfo['logg-off'];
-            
             $displayTime = "Offline";
             if ($logOffTime) {
-                // Use DB time to avoid timezone mismatch
                 $diff = $currentDbTime - strtotime($logOffTime);
-                
-                // Ensure no negative values just in case
                 if ($diff < 0) $diff = 0;
-
                 $hours = floor($diff / 3600);
                 $minutes = floor(($diff % 3600) / 60);
                 $seconds = $diff % 60;
-                
-                // Format with leading zeros
                 $timeStr = sprintf("%02d:%02d:%02d", $hours, $minutes, $seconds);
                 $displayTime = "Offline: <span style='color:#e03d24'>$timeStr</span>";
             }
@@ -143,12 +220,13 @@ if (!$conn->connect_error) {
                 "customer_number" => "-",
                 "state" => "Not on call",
                 "call_time" => $displayTime,
-                // Add dummy fields to match structure if needed
-                "user_id" => null
+                "today_total" => formatSeconds((int)$agentInfo['today_total']),
+                "yesterday_total" => formatSeconds((int)$agentInfo['yesterday_total']),
+                "today_idle_total" => formatSeconds((int)$agentInfo['today_idle_total']),
+                "user_id" => $agentInfo['agent_id']
             ];
         }
         
-        // Overwrite standard response with our merged list
         $response = json_encode($finalResponse);
     }
     $conn->close();
